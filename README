@@ -1,0 +1,17 @@
+# Go Job Queue
+
+This project implements a small HTTP API in Go that accepts jobs, persists them to SQLite, processes them asynchronously using worker pools, and exposes endpoints to query status and cancel jobs.
+
+Design choices and notable features:
+- Persistent job metadata in SQLite so the system can recover after restarts.
+- Dispatcher goroutine that pulls queued jobs and assigns them to worker pools.
+- Separate worker pools per job type (simple example): `http_webhook`, `image_resize` (simulated), and `compute_task` (simulated CPU task).
+- Exponential backoff retry with max attempts and dead-letter behavior.
+- Progress updates saved to DB so clients can poll for progress.
+
+Run:
+- `go mod tidy`
+- `go run ./...`
+
+Tests:
+- `go test ./...`
