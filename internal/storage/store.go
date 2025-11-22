@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -84,7 +85,19 @@ func (s *Store) migrate() error {
 				finished_at DATETIME NULL
 			);
 			CREATE INDEX IF NOT EXISTS idx_jobs_status_priority
-			ON jobs(status, priority DESC, created_at);
+			ON jobs(
+				status, 
+				priority DESC, 
+				created_at
+			);
+			CREATE TABLE IF NOT EXISTS dead_jobs (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				job_id INTEGER NOT NULL,
+				type TEXT NOT NULL,
+				payload BLOB NOT NULL,
+				error TEXT NOT NULL,
+				failed_at DATETIME NOT NULL
+			);
 		`)
 		return err
 	})
@@ -268,20 +281,47 @@ func (s *Store) Requeue(j *Job) error {
 	})
 }
 
-func (s *Store) MarkFailed(j *Job, msg string) error {
-	j.Status = StatusFailed
-	j.ErrorMessage = sql.NullString{String: msg, Valid: true}
-	now := time.Now().UTC()
-	j.FinishedAt = sql.NullTime{Time: now, Valid: true}
-	return s.Update(j)
-}
-
 func (s *Store) MarkSucceeded(j *Job) error {
 	j.Status = StatusSucceeded
 	j.Progress = 100
 	now := time.Now().UTC()
 	j.FinishedAt = sql.NullTime{Time: now, Valid: true}
 	return s.Update(j)
+}
+
+func (s *Store) MarkFailed(j *Job, msg string) error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
+	j.Status = StatusFailed
+	j.ErrorMessage = sql.NullString{String: msg, Valid: true}
+	now := time.Now().UTC()
+	j.FinishedAt = sql.NullTime{Time: now, Valid: true}
+
+	// Update the job first
+	if err := withRetry(func() error {
+		_, err := s.db.Exec(`
+            UPDATE jobs
+            SET status = ?, progress = ?, attempts = ?, max_attempts = ?,
+                priority = ?, error_message = ?, started_at = ?, finished_at = ?
+            WHERE id = ?`,
+			string(j.Status), j.Progress, j.Attempts, j.MaxAttempts,
+			j.Priority, nullableString(j.ErrorMessage),
+			nullableTime(j.StartedAt), nullableTime(j.FinishedAt),
+			j.ID,
+		)
+		return err
+	}); err != nil {
+		return err
+	}
+
+	// Add to DLQ
+	if err := s.AddToDeadLetter(j, msg); err != nil {
+		return err
+	}
+
+	log.Printf("[DLQ] job %d failed permanently and was moved to DLQ", j.ID)
+	return nil
 }
 
 func (s *Store) RequeueRunningJobs() error {
@@ -291,6 +331,18 @@ func (s *Store) RequeueRunningJobs() error {
         WHERE status = 'running'
     `)
 	return err
+}
+
+func (s *Store) AddToDeadLetter(j *Job, errMsg string) error {
+	return withRetry(func() error {
+		_, err := s.db.Exec(`
+            INSERT INTO dead_jobs(job_id, type, payload, error, failed_at)
+            VALUES (?, ?, ?, ?, ?)`,
+			j.ID, j.Type, j.Payload, errMsg, time.Now().UTC(),
+		)
+
+		return err
+	})
 }
 
 func nullableString(ns sql.NullString) interface{} {
