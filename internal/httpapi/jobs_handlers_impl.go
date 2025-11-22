@@ -18,10 +18,10 @@ import (
 func DoWebhook(ctx context.Context, j *storage.Job, s *storage.Store) error {
 	// parse payload
 	var p struct {
-		URL     string                 `json:"url"`
-		Method  string                 `json:"method"`
-		Headers map[string]string      `json:"headers"`
-		Body    map[string]interface{} `json:"body"`
+		URL     string            `json:"url"`
+		Method  string            `json:"method"`
+		Headers map[string]string `json:"headers"`
+		Body    interface{}       `json:"body"`
 	}
 	if err := json.Unmarshal(j.Payload, &p); err != nil {
 		return err
@@ -33,8 +33,31 @@ func DoWebhook(ctx context.Context, j *storage.Job, s *storage.Store) error {
 	if method == "" {
 		method = "POST"
 	}
-	// Serialize body
-	b, _ := json.Marshal(p.Body)
+	// ---- NORMALISE BODY ----
+	//changed because different body types were failing to unmarshall
+	var b []byte
+	switch typed := p.Body.(type) {
+
+	case string:
+		// If user gives: "body": "hello"
+		// Convert into JSON object: { "message": "hello" }
+		b, _ = json.Marshal(map[string]interface{}{
+			"message": typed,
+		})
+
+	case map[string]interface{}:
+		// Already correct: "body": { "a": "b" }
+		b, _ = json.Marshal(typed)
+
+	case nil:
+		// No body provided
+		b = []byte("{}")
+
+	default:
+		// Unsupported type (e.g. number, bool)
+		return errors.New("unsupported body type")
+	}
+
 	// Build HTTP request with context
 	req, err := http.NewRequestWithContext(ctx, method, p.URL, io.NopCloser(bytesReader(b)))
 	if err != nil {

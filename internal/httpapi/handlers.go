@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"go-job-queue/internal/storage"
+	"go-job-queue/internal/version"
 )
 
 // Handler holds dependencies for HTTP handlers.
@@ -21,10 +22,21 @@ type Handler struct {
 // NewRouter builds the HTTP router with routes bound to our handlers.
 func NewRouter(h *Handler) http.Handler {
 	r := mux.NewRouter()
+
+	r.Use(versionHeaderMiddleware)
+
 	r.HandleFunc("/jobs", h.CreateJob).Methods("POST")
 	r.HandleFunc("/jobs/{id:[0-9]+}", h.GetJob).Methods("GET")
 	r.HandleFunc("/jobs/{id:[0-9]+}/cancel", h.CancelJob).Methods("POST")
 	return r
+}
+
+func versionHeaderMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Add version header
+		w.Header().Set("X-App-Version", version.Version)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // CreateJob accepts a JSON payload to create a job.

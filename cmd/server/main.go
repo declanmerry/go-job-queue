@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -23,6 +24,9 @@ func main() {
 		log.Fatalf("failed to open store: %v", err)
 	}
 
+	//Reset and jobs that were previously still running to queued
+	store.RequeueRunningJobs()
+
 	// Dispatcher coordinates pools and jobs
 	d := queue.NewDispatcher(store)
 	d.Start()
@@ -39,6 +43,7 @@ func main() {
 	}
 
 	// graceful shutdown signals
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
@@ -51,7 +56,15 @@ func main() {
 
 	<-stop
 	log.Println("shutting down...")
+	// Gracefully stop HTTP server
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	srv.Shutdown(ctx)
+	cancel()
+	// Stop dispatcher
 	d.Stop()
-	srv.Close()
+	// Requeue any jobs still marked as running
+	store.RequeueRunningJobs()
+	// Close DB connection
+	store.Close()
 	log.Println("bye")
 }
