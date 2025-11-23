@@ -45,6 +45,7 @@ func (d *Dispatcher) Start() {
 	for name, p := range d.pools {
 		log.Printf("[dispatcher] starting pool: %s (size=%d)", name, p.size)
 		p.Start()
+
 	}
 
 	go d.loop()

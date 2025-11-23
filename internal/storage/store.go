@@ -83,7 +83,8 @@ func (s *Store) migrate() error {
 				created_at DATETIME NOT NULL,
 				started_at DATETIME NULL,
 				finished_at DATETIME NULL,
-				last_heartbeat DATETIME NULL
+				last_heartbeat DATETIME NULL,
+				idempotency_key TEXT UNIQUE
 			);
 			CREATE INDEX IF NOT EXISTS idx_jobs_status_priority
 			ON jobs(
@@ -124,16 +125,67 @@ func (s *Store) Enqueue(j *Job) (*Job, error) {
 	writeMu.Lock()
 	defer writeMu.Unlock()
 
+	if j.IdempotencyKey.Valid && j.IdempotencyKey.String != "" {
+		existing, err := s.FindByIdempotencyKey(j.IdempotencyKey.String)
+		if err == nil && existing != nil {
+			// Return the previously created job, do NOT insert a duplicate
+			return existing, nil
+		}
+	}
+
 	if err := j.ValidateBasic(); err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
 
+	//Idempotency key check
+	if j.IdempotencyKey.Valid && j.IdempotencyKey.String != "" {
+
+		var existing Job
+		var payload string
+		var errMsg sql.NullString
+
+		err := withRetry(func() error {
+			row := s.db.QueryRow(`
+				SELECT id, type, payload, status, progress, attempts,
+				       max_attempts, priority, error_message,
+				       created_at, started_at, finished_at, last_heartbeat
+				FROM jobs
+				WHERE idempotency_key = ?
+				LIMIT 1`,
+				j.IdempotencyKey.String,
+			)
+
+			return row.Scan(
+				&existing.ID, &existing.Type, &payload, &existing.Status,
+				&existing.Progress, &existing.Attempts, &existing.MaxAttempts,
+				&existing.Priority, &errMsg,
+				&existing.CreatedAt, &existing.StartedAt, &existing.FinishedAt,
+				&existing.LastHeartbeat,
+			)
+		})
+
+		if err == nil {
+			// Already exists → return previous job
+			existing.Payload = []byte(payload)
+			existing.ErrorMessage = errMsg
+			return &existing, nil
+		}
+		// err != nil → job does not exist, continue to insert
+	}
+
+	//new job
+
 	err := withRetry(func() error {
 		res, err := s.db.Exec(`
-			INSERT INTO jobs(type, payload, status, progress, attempts, max_attempts, priority, created_at)
-			VALUES(?,?,?,?,?,?,?,?)`,
-			j.Type, string(j.Payload), string(StatusQueued), 0, 0, j.MaxAttempts, j.Priority, now,
+			INSERT INTO jobs(
+				type, payload, status, progress, attempts, 
+				max_attempts, priority, created_at, idempotency_key
+			)
+			VALUES(?,?,?,?,?,?,?,?,?)`,
+			j.Type, string(j.Payload), string(StatusQueued),
+			0, 0, j.MaxAttempts, j.Priority, now,
+			j.IdempotencyKey.String,
 		)
 		if err != nil {
 			return err
@@ -175,6 +227,39 @@ func (s *Store) Get(id int64) (*Job, error) {
 		)
 	})
 
+	if err != nil {
+		return nil, err
+	}
+
+	j.Payload = []byte(payload)
+	j.ErrorMessage = errMsg
+	return &j, nil
+}
+
+func (s *Store) FindByIdempotencyKey(key string) (*Job, error) {
+	var j Job
+	var payload string
+	var errMsg sql.NullString
+
+	err := withRetry(func() error {
+		row := s.db.QueryRow(`
+            SELECT id, type, payload, status, progress, attempts,
+                   max_attempts, priority, error_message,
+                   created_at, started_at, finished_at, last_heartbeat
+            FROM jobs WHERE idempotency_key = ? LIMIT 1`,
+			key,
+		)
+
+		return row.Scan(
+			&j.ID, &j.Type, &payload, &j.Status, &j.Progress,
+			&j.Attempts, &j.MaxAttempts, &j.Priority, &errMsg,
+			&j.CreatedAt, &j.StartedAt, &j.FinishedAt, &j.LastHeartbeat,
+		)
+	})
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -41,22 +41,35 @@ func versionHeaderMiddleware(next http.Handler) http.Handler {
 
 // CreateJob accepts a JSON payload to create a job.
 func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
+	idem := r.Header.Get("Idempotency-Key")
+
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	defer r.Body.Close()
+
 	var j storage.Job
 	if err := json.Unmarshal(body, &j); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
+
 	// ensure payload remains raw
 	j.Payload = json.RawMessage(j.Payload)
 	if j.MaxAttempts == 0 {
 		j.MaxAttempts = 3
 	}
+
+	// Apply idempotency key if provided
+	if idem != "" {
+		j.IdempotencyKey = sql.NullString{
+			String: idem,
+			Valid:  true,
+		}
+	}
+
 	// store
 	enq, err := h.Store.Enqueue(&j)
 	if err != nil {
@@ -64,6 +77,8 @@ func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(enq)
