@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log"
 	"strconv"
@@ -95,14 +96,23 @@ func (p *WorkerPool) worker(idx int) {
 
 		startTime := time.Now()
 
+		//Initial heartbeat: mark this job as alive right now
+		if err := p.store.UpdateHeartbeat(j.ID); err != nil {
+			log.Printf("[heartbeat] failed to update heartbeat for job %d: %v", j.ID, err)
+		}
+
 		// Give each job a timeout
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 
 		func() {
 			defer cancel()
 
+			heartbeatStop := make(chan struct{})
+			go p.startHeartbeat(ctx, j, heartbeatStop)
 			err := p.handler(ctx, j)
+			close(heartbeatStop)
 
+			//Execute handler functions
 			if err == nil {
 				// Log success
 				duration := time.Since(startTime)
@@ -126,9 +136,11 @@ func (p *WorkerPool) worker(idx int) {
 				j.MaxAttempts,
 			)
 
-			// If max attempts reached → fail permanently
+			// If max attempts reached → fail permanently & add to Dead Letter Queue
 			if j.Attempts+1 >= j.MaxAttempts {
 				p.store.MarkFailed(j, err.Error())
+				p.store.AddToDeadLetter(j, err.Error())
+				log.Printf("[DLQ] job %d moved to dead-letter queue", j.ID)
 				return
 			}
 
@@ -154,4 +166,30 @@ func (p *WorkerPool) worker(idx int) {
 	}
 
 	log.Printf("[worker %s] exiting", workerName)
+}
+
+// Heartbeats run every 5 seconds while a job is in progress
+func (p *WorkerPool) startHeartbeat(ctx context.Context, j *storage.Job, stop chan struct{}) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Update heartbeat timestamp and progress indicator
+			ts := time.Now().UTC()
+			// Store in job struct
+			j.LastHeartbeat = sql.NullTime{
+				Time:  ts,
+				Valid: true,
+			}
+			// Persist to DB
+			p.store.UpdateHeartbeat(j.ID)
+			log.Printf("[heartbeat] job %d alive at %v", j.ID, j.LastHeartbeat)
+		}
+	}
 }

@@ -99,26 +99,56 @@ func DoImageResize(ctx context.Context, j *storage.Job, s *storage.Store) error 
 	return nil
 }
 
-// doCompute simulates a CPU-bound task. We'll run a deterministic small calculation to mimic CPU use.
+// doCompute simulates a long CPU task with progress + heartbeat
 func DoCompute(ctx context.Context, j *storage.Job, s *storage.Store) error {
-	// simulate CPU by performing work in a loop and checking context
+
+	var p struct {
+		N int `json:"n"`
+	}
+	if err := json.Unmarshal(j.Payload, &p); err != nil {
+		return err
+	}
+	if p.N <= 0 {
+		p.N = 20 // default workload
+	}
+
+	totalSteps := p.N
 	res := 0
-	for i := 0; i < 500000; i++ {
-		if i%100000 == 0 {
-			j.Progress += 20
-			s.Update(j)
+
+	for step := 1; step <= totalSteps; step++ {
+
+		// Light CPU work
+		for x := 0; x < 2_000_000; x++ { // ~2M ops (fast)
+			res += x % 13
 		}
+
+		// Make progress SLOW enough to see heartbeats
+		time.Sleep(200 * time.Millisecond)
+
+		// Check cancellation
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-		res += i % 7
+
+		// PROGRESS
+		j.Progress = (step * 100) / totalSteps
+		if err := s.Update(j); err != nil {
+			return err
+		}
+
+		// HEARTBEAT
+		if err := s.UpdateHeartbeat(j.ID); err != nil {
+			return err
+		}
 	}
-	// store a tiny result into payload (not ideal for large results)
-	r := map[string]int{"checksum": res}
-	b, _ := json.Marshal(r)
+
+	// Store result
+	output := map[string]int{"checksum": res}
+	b, _ := json.Marshal(output)
 	j.Payload = b
+
 	return nil
 }
 

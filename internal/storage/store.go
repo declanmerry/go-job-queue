@@ -82,7 +82,8 @@ func (s *Store) migrate() error {
 				error_message TEXT,
 				created_at DATETIME NOT NULL,
 				started_at DATETIME NULL,
-				finished_at DATETIME NULL
+				finished_at DATETIME NULL,
+				last_heartbeat DATETIME NULL
 			);
 			CREATE INDEX IF NOT EXISTS idx_jobs_status_priority
 			ON jobs(
@@ -99,8 +100,22 @@ func (s *Store) migrate() error {
 				failed_at DATETIME NOT NULL
 			);
 		`)
+
+		// If CREATE TABLE fails for ANY reason other than "already exists",
+		// stop migration.
+		if err != nil && !strings.Contains(err.Error(), "already exists") {
+			return err
+		}
+
+		if err := s.ensureHeartbeatColumn(); err != nil {
+			return err
+		}
+
+		log.Println("[migrate] Schema ensured/migrated successfully")
+
 		return err
 	})
+
 }
 
 // ================ CRUD Operations ===================
@@ -150,13 +165,13 @@ func (s *Store) Get(id int64) (*Job, error) {
 		row := s.db.QueryRow(`
 			SELECT id, type, payload, status, progress, attempts,
 			       max_attempts, priority, error_message,
-			       created_at, started_at, finished_at
+			       created_at, started_at, finished_at, last_heartbeat
 			FROM jobs WHERE id = ?`, id)
 
 		return row.Scan(
 			&j.ID, &j.Type, &payload, &j.Status, &j.Progress,
 			&j.Attempts, &j.MaxAttempts, &j.Priority, &errMsg,
-			&j.CreatedAt, &j.StartedAt, &j.FinishedAt,
+			&j.CreatedAt, &j.StartedAt, &j.FinishedAt, &j.LastHeartbeat,
 		)
 	})
 
@@ -343,6 +358,64 @@ func (s *Store) AddToDeadLetter(j *Job, errMsg string) error {
 
 		return err
 	})
+}
+
+func (s *Store) ensureHeartbeatColumn() error {
+	_, err := s.db.Exec(`
+        ALTER TABLE jobs ADD COLUMN last_heartbeat DATETIME NULL;
+    `)
+	if err != nil {
+		// ignoring duplicate column errors
+		if strings.Contains(err.Error(), "duplicate column") {
+			return nil
+		}
+		if strings.Contains(err.Error(), "already exists") {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *Store) UpdateHeartbeat(jobID int64) error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
+	return withRetry(func() error {
+		_, err := s.db.Exec(`
+            UPDATE jobs 
+            SET last_heartbeat = ?
+            WHERE id = ?`,
+			time.Now().UTC(), jobID,
+		)
+		return err
+	})
+}
+
+func (s *Store) FindStaleJobs(maxAge time.Duration) ([]int64, error) {
+	cutoff := time.Now().UTC().Add(-maxAge)
+
+	rows, err := s.db.Query(`
+        SELECT id FROM jobs
+        WHERE status = 'running'
+        AND (last_heartbeat IS NULL OR last_heartbeat < ?)`,
+		cutoff,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+
+	return ids, nil
 }
 
 func nullableString(ns sql.NullString) interface{} {
