@@ -9,14 +9,32 @@ import (
 	"syscall"
 	"time"
 
-	_ "modernc.org/sqlite" // <-- IMPORTANT
+	_ "modernc.org/sqlite" //DB & SQL
 
 	"go-job-queue/internal/httpapi"
+	"go-job-queue/internal/otelsetup"
 	"go-job-queue/internal/queue"
 	"go-job-queue/internal/storage"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp" //Open Telemetry
 )
 
 func main() {
+	ctx := context.Background()
+
+	//Initialise OTel ---
+	meterProvider, err := otelsetup.InitOTel(ctx)
+	if err != nil {
+		log.Fatalf("failed to init OTel: %v", err)
+	}
+
+	// Ensure we flush/export metrics on shutdown
+	defer func() {
+		if err := meterProvider(ctx); err != nil {
+			log.Printf("OTel shutdown error: %v", err)
+		}
+	}()
+
 	// Configure DB path (sqlite file)
 	dbPath := "jobs.db"
 	store, err := storage.NewStore(dbPath)
@@ -35,9 +53,12 @@ func main() {
 	h := &httpapi.Handler{Store: store}
 	r := httpapi.NewRouter(h)
 
+	//Wrap router with OpenTelemetry handler
+	otelWrapped := otelhttp.NewHandler(r, "http-server")
+
 	srv := &http.Server{
 		Addr:         ":8080",
-		Handler:      r,
+		Handler:      otelWrapped,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
