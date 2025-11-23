@@ -1,13 +1,53 @@
 # Go Job Queue
 
-This project implements a small HTTP API in Go that accepts jobs, persists them to SQLite, processes them asynchronously using worker pools, and exposes endpoints to query status and cancel jobs.
+This project implements a small HTTP API in Go that accepts jobs, persists them to SQLite, processes them asynchronously using worker pools, and exposes endpoints to query status and cancel jobs. This is not something I have made before and once it was functioning at a basic level I added functionality that I believe represents real world use-cases.
 
-Design choices and notable features:
-- Persistent job metadata in SQLite so the system can recover after restarts.
-- Dispatcher goroutine that pulls queued jobs and assigns them to worker pools.
-- Separate worker pools per job type (simple example): `http_webhook`, `image_resize` (simulated), and `compute_task` (simulated CPU task).
-- Exponential backoff retry with max attempts and dead-letter behavior.
-- Progress updates saved to DB so clients can poll for progress.
+Jobs are submitted over HTTP, stored in SQLite, and processed by worker pools with progress tracking and retry logic.
+The system supports job persistence, safe restarts, and observability through OpenTelemetry.
+
+Job Queue and Dispatcher
+Multiple worker pools (compute, http_webhook, image_resize)
+Persistent job storage using SQLite
+Priority based job ordering
+Exponential backoff retries
+Per job timeout enforcement
+
+Worker Pools
+compute_task CPU bound workload
+http_webhook Performs outbound HTTP requests
+image_resize Simulated IO and CPU workload
+
+Durable Storage
+SQLite with WAL mode for concurrency
+Tables for jobs and dead letter queue entries
+Automatic schema migration on startup
+
+Heartbeats
+Each running job updates a last_heartbeat timestamp
+Enables monitoring for stuck or stalled jobs
+
+Idempotency Keys
+Supports header Idempotency-Key
+Same key returns same job
+Prevents duplicate job creation
+
+Dead Letter Queue
+Jobs that exceed retry limit are marked failed
+A record is stored in dead_jobs table
+Failures are logged for inspection
+
+Graceful Shutdown and Recovery
+Workers finish current job on shutdown
+Dispatcher stops scheduling new work
+Database closes safely
+On startup, all running jobs are reset to queued
+
+OpenTelemetry
+Traces exported to stdout
+Metrics exported via OTLP or stdout
+jobs_created_total metric available
+All HTTP routes instrumented with OpenTelemetry middleware
+
 
 Run:
 - `go mod tidy`
